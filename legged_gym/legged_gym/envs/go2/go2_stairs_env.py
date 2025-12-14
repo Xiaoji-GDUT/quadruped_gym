@@ -105,6 +105,9 @@ class Go2StairsRobot( LeggedRobot ):
         self.last_dof_vel[:] = self.dof_vel[:]
         self.last_root_vel[:] = self.root_states[:, 7:13]
 
+        if self.viewer and self.enable_viewer_sync and self.debug_viz:
+            self._draw_debug_vis()
+
     def check_termination(self):
         """ Check if environments need to be reset
         """
@@ -135,6 +138,7 @@ class Go2StairsRobot( LeggedRobot ):
         # reset robot states
         self._reset_dofs(env_ids)
         self._reset_root_states(env_ids)
+
         self._resample_commands(env_ids)
 
         self.actions[env_ids] = 0.
@@ -196,16 +200,10 @@ class Go2StairsRobot( LeggedRobot ):
         ), dim=-1) # total obs dimension: 3 + 3 + 12 + 12 + 3 + 12 + 12 = 57
         
         self.privileged_obs_buf = torch.cat((
-            self.base_lin_vel *self.obs_scales.lin_vel, # 3
-            self.base_ang_vel * self.obs_scales.ang_vel, # 3
-            self.commands[:, :3] * self.commands_scale, # 3
-            (self.dof_pos - self.default_dof_pos) * self.obs_scales.dof_pos, # 12
-            self.dof_pos * self.obs_scales.dof_pos, # 12
-            self.dof_vel * self.obs_scales.dof_vel, # 12
-            self.measured_heights, # 186
-            self.actions, # 12
-            self.last_actions # 12
-        ), dim=-1) # total priv obs dimension: 3 + 3 + 3 + 12 + 12 + 12 + 186 = 256
+            self.obs_buf, # 57
+            self.base_lin_vel * self.obs_scales.lin_vel, # 3
+            self.measured_heights, # 187
+        ), dim=-1) # total priv obs dimension: 57 + 3 + 187 = 247
 
         if self.add_noise:  
             self.obs_buf += (2 * torch.rand_like(self.obs_buf) - 1) * self.noise_scale_vec
@@ -213,7 +211,7 @@ class Go2StairsRobot( LeggedRobot ):
     def create_sim(self):
         """ Creates simulation, terrain and evironments
         """
-        self.up_axis_idx = 2
+        self.up_axis_idx = 2 # 2 for z, 1 for y -> adapt gravity accordingly
         self.sim = self.gym.create_sim(self.sim_device_id, self.graphics_device_id, self.physics_engine, self.sim_params)
         mesh_type = self.cfg.terrain.mesh_type
         if mesh_type in ['heightfield', 'trimesh']:
@@ -366,6 +364,23 @@ class Go2StairsRobot( LeggedRobot ):
             raise NameError(f"Unknown controller type: {control_type}")
         
         return torch.clip(torques, -self.torque_limits, self.torque_limits)
+    
+    def _reset_dofs(self, env_ids):
+        """ Resets DOF position and velocities of selected environmments
+        Positions are randomly selected within 0.5:1.5 x default positions.
+        Velocities are set to zero.
+
+        Args:
+            env_ids (List[int]): Environemnt ids
+        """
+        self.dof_pos[env_ids] = self.default_dof_pos + torch_rand_float(-0.1, 0.1, (len(env_ids), self.num_dof), device=self.device)
+        self.dof_vel[env_ids] = 0.
+
+        env_ids_int32 = env_ids.to(dtype=torch.int32)
+        self.gym.set_dof_state_tensor_indexed(self.sim,
+                                              gymtorch.unwrap_tensor(self.dof_state),
+                                              gymtorch.unwrap_tensor(env_ids_int32), len(env_ids_int32))
+
     
     def _reset_root_states(self, env_ids):
         """ Resets ROOT states position and velocities of selected environmments
@@ -926,8 +941,7 @@ class Go2StairsRobot( LeggedRobot ):
     
     def _reward_stumble(self):
         # Penalize feet hitting vertical surfaces
-        return torch.any(torch.norm(self.contact_forces[:, self.feet_indices, :2], dim=2) >\
-             5 *torch.abs(self.contact_forces[:, self.feet_indices, 2]), dim=1)
+        return torch.any(torch.norm(self.contact_forces[:, self.feet_indices, :2], dim=2) > 5 *torch.abs(self.contact_forces[:, self.feet_indices, 2]), dim=1)
 
     def _reward_feet_air_time(self):
         # Reward long steps

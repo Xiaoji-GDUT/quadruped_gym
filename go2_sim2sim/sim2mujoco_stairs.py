@@ -158,7 +158,7 @@ if __name__ == '__main__':
         class sim_config:
             mujoco_model_path = args.mujoco_model
             sim_duration = 120.
-            dt = 0.001
+            dt = 0.0005
             decimation = 20
         
         class robot_config:

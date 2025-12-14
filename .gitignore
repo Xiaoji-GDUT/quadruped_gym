@@ -1,0 +1,10 @@
+go2_sr/.catkin_tools/
+go2_sr/devel/
+go2_sr/build/
+go2_sr/logs/
+go2_sr/library/
+go2_sr/library/inference_runtime/
+go2_sr/src/rl_sar_zoo/
+go2_sr/src/go2_sr/library/thirdparty/
+CLAUDE.md
+.vscode/

@@ -1,0 +1,240 @@
+#include "rl_sim.hpp"
+
+RL_Sim::RL_Sim(int argc, char **argv){
+    this->ang_vel_axis = "world";  // Set to "world" frame for simulation
+    ros::NodeHandle nh;
+    nh.param<std::string>("ros_namespace", this->ros_namespace, "");
+    nh.param<std::string>("robot_name", this->robot_name, "");
+    // read params from yaml
+    this->ReadYaml(this->robot_name, "base.yaml");
+    if (FSMManager::GetInstance().IsTypeSupported(this->robot_name)){
+        auto fsm_ptr = FSMManager::GetInstance().CreateFSM(this->robot_name, this);
+        if (fsm_ptr){
+            this->fsm = *fsm_ptr;
+        }
+    }
+    else{
+        std::cout << LOGGER::ERROR << "[FSM] No FSM registered for robot: " << this->robot_name << std::endl;
+    }
+    // init robot
+    this->joint_publishers_commands.resize(this->params.Get<int>("num_of_dofs"));
+    this->InitJointNum(this->params.Get<int>("num_of_dofs"));
+    this->InitOutputs();
+    this->InitControl();
+    auto joint_controller_names_vec = this->params.Get<std::vector<std::string>>("joint_controller_names");  // avoid dangling reference
+    this->StartJointController(this->ros_namespace, joint_controller_names_vec);
+    // publisher
+    for (int i = 0; i < this->params.Get<int>("num_of_dofs"); ++i){
+        const std::string &joint_controller_name = joint_controller_names_vec[i];
+        const std::string topic_name = this->ros_namespace + joint_controller_name + "/command";
+        this->joint_publishers[joint_controller_name] =
+            nh.advertise<robot_msgs::MotorCommand>(topic_name, 10);
+    }
+    // subscriber
+    this->cmd_vel_subscriber = nh.subscribe<geometry_msgs::Twist>("/cmd_vel", 10, &RL_Sim::CmdvelCallback, this);
+    this->model_state_subscriber = nh.subscribe<gazebo_msgs::ModelStates>("/gazebo/model_states", 10, &RL_Sim::ModelStatesCallback, this);
+    for (int i = 0; i < this->params.Get<int>("num_of_dofs"); ++i){
+        const std::string &joint_controller_name = joint_controller_names_vec[i];
+        const std::string topic_name = this->ros_namespace + joint_controller_name + "/state";
+        this->joint_subscribers[joint_controller_name] =
+            nh.subscribe<robot_msgs::MotorState>(topic_name, 10,
+                [this, joint_controller_name](const robot_msgs::MotorState::ConstPtr &msg)
+                {
+                    this->JointStatesCallback(msg, joint_controller_name);
+                }
+            );
+        this->joint_positions[joint_controller_name] = 0.0f;
+        this->joint_velocities[joint_controller_name] = 0.0f;
+        this->joint_efforts[joint_controller_name] = 0.0f;
+    }
+    // service
+    nh.param<std::string>("gazebo_model_name", this->gazebo_model_name, "");
+    this->gazebo_pause_physics_client = nh.serviceClient<std_srvs::Empty>("/gazebo/pause_physics");
+    this->gazebo_unpause_physics_client = nh.serviceClient<std_srvs::Empty>("/gazebo/unpause_physics");
+    this->gazebo_reset_world_client = nh.serviceClient<std_srvs::Empty>("/gazebo/reset_world");
+
+
+    // loop
+    this->loop_control = std::make_shared<LoopFunc>("loop_control", this->params.Get<float>("dt"), std::bind(&RL_Sim::RobotControl, this));
+    this->loop_rl = std::make_shared<LoopFunc>("loop_rl", this->params.Get<float>("dt") * this->params.Get<int>("decimation"), std::bind(&RL_Sim::RunModel, this));
+    this->loop_control->start();
+    this->loop_rl->start();
+
+    // keyboard
+    this->loop_keyboard = std::make_shared<LoopFunc>("loop_keyboard", 0.05, std::bind(&RL_Sim::KeyboardInterface, this));
+    this->loop_keyboard->start();
+
+#ifdef CSV_LOGGER
+    this->CSVInit(this->robot_name);
+#endif
+    std::cout << LOGGER::INFO << "RL_Sim start" << std::endl;
+}
+
+RL_Sim::~RL_Sim(){
+    this->loop_keyboard->shutdown();
+    this->loop_control->shutdown();
+    this->loop_rl->shutdown();
+    std::cout << LOGGER::INFO << "RL_Sim exit" << std::endl;
+}
+
+void RL_Sim::StartJointController(const std::string& ros_namespace, const std::vector<std::string>& name){
+    pid_t pid0 = fork();
+    if (pid0 == 0){
+        std::string cmd = "rosrun controller_manager spawner joint_state_controller ";
+        for (const auto& name : name){
+            cmd += name + " ";
+        }
+        cmd += "__ns:=" + ros_namespace;
+        // cmd += " > /dev/null 2>&1";  // Comment this line to see the output
+        execlp("sh", "sh", "-c", cmd.c_str(), nullptr);
+        exit(1);
+    }
+}
+
+void RL_Sim::GetState(RobotState<float> *state){
+    const auto &orientation = this->pose.orientation;
+    const auto &angular_velocity = this->vel.angular;
+
+    state->imu.quaternion[0] = orientation.w;
+    state->imu.quaternion[1] = orientation.x;
+    state->imu.quaternion[2] = orientation.y;
+    state->imu.quaternion[3] = orientation.z;
+
+    state->imu.gyroscope[0] = angular_velocity.x;
+    state->imu.gyroscope[1] = angular_velocity.y;
+    state->imu.gyroscope[2] = angular_velocity.z;
+
+    for (int i = 0; i < this->params.Get<int>("num_of_dofs"); ++i){
+        state->motor_state.q[i] = this->joint_positions[this->params.Get<std::vector<std::string>>("joint_controller_names")[this->params.Get<std::vector<int>>("joint_mapping")[i]]];
+        state->motor_state.dq[i] = this->joint_velocities[this->params.Get<std::vector<std::string>>("joint_controller_names")[this->params.Get<std::vector<int>>("joint_mapping")[i]]];
+        state->motor_state.tau_est[i] = this->joint_efforts[this->params.Get<std::vector<std::string>>("joint_controller_names")[this->params.Get<std::vector<int>>("joint_mapping")[i]]];
+    }
+}
+
+void RL_Sim::SetCommand(const RobotCommand<float> *command){
+    for (int i = 0; i < this->params.Get<int>("num_of_dofs"); ++i){
+        this->joint_publishers_commands[this->params.Get<std::vector<int>>("joint_mapping")[i]].q = command->motor_command.q[i];
+        this->joint_publishers_commands[this->params.Get<std::vector<int>>("joint_mapping")[i]].dq = command->motor_command.dq[i];
+        this->joint_publishers_commands[this->params.Get<std::vector<int>>("joint_mapping")[i]].kp = command->motor_command.kp[i];
+        this->joint_publishers_commands[this->params.Get<std::vector<int>>("joint_mapping")[i]].kd = command->motor_command.kd[i];
+        this->joint_publishers_commands[this->params.Get<std::vector<int>>("joint_mapping")[i]].tau = command->motor_command.tau[i];
+    }
+    for (int i = 0; i < this->params.Get<int>("num_of_dofs"); ++i){
+        this->joint_publishers[this->params.Get<std::vector<std::string>>("joint_controller_names")[i]].publish(this->joint_publishers_commands[i]);
+    }
+}
+
+void RL_Sim::RobotControl(){
+    this->GetState(&this->robot_state);
+
+    this->StateController(&this->robot_state, &this->robot_command);
+
+    if (this->control.current_key == Input::Keyboard::R){
+        std_srvs::Empty empty;
+        this->gazebo_reset_world_client.call(empty);
+        this->control.current_key = this->control.last_key;
+    }
+    if (this->control.current_key == Input::Keyboard::Enter){
+        if (simulation_running){
+            std_srvs::Empty empty;
+            this->gazebo_pause_physics_client.call(empty);
+            std::cout << std::endl << LOGGER::INFO << "Simulation Stop" << std::endl;
+        }
+        else{
+            std_srvs::Empty empty;
+            this->gazebo_unpause_physics_client.call(empty);
+            std::cout << std::endl << LOGGER::INFO << "Simulation Start" << std::endl;
+        }
+        simulation_running = !simulation_running;
+        this->control.current_key = this->control.last_key;
+    }
+    this->control.ClearInput();
+
+    this->SetCommand(&this->robot_command);
+}
+
+void RL_Sim::ModelStatesCallback(const gazebo_msgs::ModelStates::ConstPtr &msg){
+    this->vel = msg->twist[2];
+    this->pose = msg->pose[2];
+}
+
+void RL_Sim::CmdvelCallback(const geometry_msgs::Twist::ConstPtr &msg){
+    this->cmd_vel = *msg;
+}
+
+void RL_Sim::JointStatesCallback(const robot_msgs::MotorState::ConstPtr &msg, const std::string &joint_controller_name){
+    this->joint_positions[joint_controller_name] = msg->q;
+    this->joint_velocities[joint_controller_name] = msg->dq;
+    this->joint_efforts[joint_controller_name] = msg->tau_est;
+}
+
+void RL_Sim::RunModel(){
+    if (this->rl_init_done && simulation_running){
+        this->episode_length_buf += 1;
+        this->obs.ang_vel = this->robot_state.imu.gyroscope;
+        this->obs.commands = {this->control.x, this->control.y, this->control.yaw};
+        if (this->control.navigation_mode){
+            this->obs.commands = {(float)this->cmd_vel.linear.x, (float)this->cmd_vel.linear.y, (float)this->cmd_vel.angular.z};
+        }
+        this->obs.base_quat = this->robot_state.imu.quaternion;
+        this->obs.dof_pos = this->robot_state.motor_state.q;
+        this->obs.dof_vel = this->robot_state.motor_state.dq;
+        this->obs.actions = this->Forward();
+        this->ComputeOutput(this->obs.actions, this->output_dof_pos, this->output_dof_vel, this->output_dof_tau);
+        if (!this->output_dof_pos.empty()){
+            output_dof_pos_queue.push(this->output_dof_pos);
+        }
+        if (!this->output_dof_vel.empty()){
+            output_dof_vel_queue.push(this->output_dof_vel);
+        }
+        if (!this->output_dof_tau.empty()){
+            output_dof_tau_queue.push(this->output_dof_tau);
+        }
+#ifdef CSV_LOGGER
+        std::vector<float> tau_est(this->params.Get<int>("num_of_dofs"), 0.0f);
+        for (int i = 0; i < this->params.Get<int>("num_of_dofs"); ++i){
+            tau_est[i] = this->joint_efforts[this->params.Get<std::vector<std::string>>("joint_controller_names")[i]];
+        }
+        this->CSVLogger(this->output_dof_tau, tau_est, this->obs.dof_pos, this->output_dof_pos, this->obs.dof_vel);
+#endif
+    }
+}
+
+std::vector<float> RL_Sim::Forward(){
+    std::unique_lock<std::mutex> lock(this->model_mutex, std::try_to_lock);
+    if (!lock.owns_lock()){
+        std::cout << LOGGER::WARNING << "Model is being reinitialized, using previous actions" << std::endl;
+        return this->obs.actions;
+    }
+
+    std::vector<float> clamped_obs = this->ComputeObservation();
+
+    std::vector<float> actions;
+    if (this->params.Get<std::vector<int>>("observations_history").size() != 0){
+        this->history_obs_buf.insert(clamped_obs);
+        this->history_obs = this->history_obs_buf.get_obs_vec(this->params.Get<std::vector<int>>("observations_history"));
+        actions = this->model->forward({this->history_obs});
+    }
+    else{
+        actions = this->model->forward({clamped_obs});
+    }
+    if (!this->params.Get<std::vector<float>>("clip_actions_upper").empty() && !this->params.Get<std::vector<float>>("clip_actions_lower").empty()){
+        return clamp(actions, this->params.Get<std::vector<float>>("clip_actions_lower"), this->params.Get<std::vector<float>>("clip_actions_upper"));
+    }
+    else{
+        return actions;
+    }
+}
+
+void signalHandler(int signum){
+    ros::shutdown();
+    exit(0);
+}
+
+int main(int argc, char **argv){
+    signal(SIGINT, signalHandler);
+    ros::init(argc, argv, "go2_sr");
+    RL_Sim rl_sar(argc, argv);
+    ros::spin();
+    return 0;
+}

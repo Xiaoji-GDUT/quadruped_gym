@@ -4,7 +4,7 @@ class Go2StairsCfg( LeggedRobotCfg ):
     class env:
         num_envs = 4096
         num_observations = 57
-        num_privileged_obs = 256
+        num_privileged_obs = 247
         num_actions = 12
         episode_length_s = 24 # episode length in seconds
         env_spacing = 3.  # not used with heightfields/trimeshes 
@@ -129,8 +129,8 @@ class Go2StairsCfg( LeggedRobotCfg ):
         max_contact_force = 100.
         class scales:
             termination = -0.0
-            tracking_lin_vel = 30.
-            tracking_ang_vel = 10.
+            tracking_lin_vel = 80.
+            tracking_ang_vel = 40.
             lin_vel_z = -10.0
             ang_vel_xy = -0.5
             orientation = -0.2
@@ -138,13 +138,13 @@ class Go2StairsCfg( LeggedRobotCfg ):
             torques = -0.0001 
             dof_acc = -1.5e-7
             dof_vel = -1e-4
-            collision = -50.
-            action_rate = -0.01
-            feet_air_time = 20.0
-            default_pos = -0.6
+            collision = -100.
+            action_rate = -0.1
+            feet_air_time = 0.0
+            default_pos = -10.
             stumble = -0.6
             feet_contact_forces = -0.
-            stand_still = -2.
+            stand_still = -20.
 
     class normalization:
         clip_observations = 100.

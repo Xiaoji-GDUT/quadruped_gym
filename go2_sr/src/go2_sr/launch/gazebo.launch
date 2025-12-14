@@ -44,6 +44,6 @@
     </node>
 
     <!-- Load joy node -->
-    <node pkg="joy" type="joy_node" name="joy_node" output="screen"/>
+    <!-- <node pkg="joy" type="joy_node" name="joy_node" output="screen"/> -->
 
 </launch>

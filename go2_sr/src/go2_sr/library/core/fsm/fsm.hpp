@@ -58,9 +58,11 @@ public:
         if (mode_ == Mode::NORMAL){
             current_state_->Run();
             std::string next = current_state_->CheckChange();
-            mode_ = Mode::CHANGE;
-            next_state_ = states_.at(next);
-            std::cout << std::endl << LOGGER::NOTE << "[FSM] Switch from " << current_state_->GetStateName() << " to " << next_state_->GetStateName() << std::endl;
+            if (next != current_state_->GetStateName()) {  // Only change if actually changing to a different state
+                mode_ = Mode::CHANGE;
+                next_state_ = states_.at(next);
+                std::cout << std::endl << LOGGER::NOTE << "[FSM] Switch from " << current_state_->GetStateName() << " to " << next_state_->GetStateName() << std::endl;
+            }
         }
         else if (mode_ == Mode::CHANGE){
             current_state_->Exit();

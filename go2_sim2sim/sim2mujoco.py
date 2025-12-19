@@ -25,13 +25,13 @@ def on_press(key):
         elif key == keyboard.Key.down:
             x_vel_cmd -= 0.3
         elif key == keyboard.Key.left:
-            yaw_vel_cmd += 0.3
-        elif key == keyboard.Key.right:
-            yaw_vel_cmd -= 0.3
-        elif key.char == ',':
             y_vel_cmd += 0.3
-        elif key.char == '.':
+        elif key == keyboard.Key.right:
             y_vel_cmd -= 0.3
+        elif key.char == ',':
+            yaw_vel_cmd += 0.3
+        elif key.char == '.':
+            yaw_vel_cmd -= 0.3
         elif key.char == 'm':
             x_vel_cmd, y_vel_cmd, yaw_vel_cmd = 0.0, 0.0, 0.0
         x_vel_cmd = np.clip(x_vel_cmd, -x_vel_max, x_vel_max)
@@ -127,20 +127,26 @@ def run_mujoco(policy, cfg):
         base_pos, dof_pos, dof_vel, quat, base_lin_vel, base_ang_vel, projected_gravity = get_obs(data)
         # 1000hz -> 100hz
         if count_lowlevel % decim == 0:
-            if np.abs(x_vel_cmd) < 0.1 and np.abs(y_vel_cmd) < 0.1 and np.abs(yaw_vel_cmd) < 0.1:
-                gait_freq = 0.0  # Hz
-                gait_phase = 0.0
-                gait_offset = 0.0
-                gait_bound = 0.0
-                gait_duration = 0.0
-                swing_height = 0.0
-            else:
-                gait_freq = 3.0  # Hz
-                gait_phase = 0.5
-                gait_offset = 0.0
-                gait_bound = 0.0
-                gait_duration = 0.5
-                swing_height = 0.03
+            # if np.abs(x_vel_cmd) < 0.1 and np.abs(y_vel_cmd) < 0.1 and np.abs(yaw_vel_cmd) < 0.1:
+            #     gait_freq = 0.0  # Hz
+            #     gait_phase = 0.0
+            #     gait_offset = 0.0
+            #     gait_bound = 0.0
+            #     gait_duration = 0.0
+            #     swing_height = 0.0
+            # else:
+            #     gait_freq = 3.0  # Hz
+            #     gait_phase = 0.5
+            #     gait_offset = 0.0
+            #     gait_bound = 0.0
+            #     gait_duration = 0.5
+            #     swing_height = 0.03
+            gait_freq = 3.0  # Hz
+            gait_phase = 0.5
+            gait_offset = 0.0
+            gait_bound = 0.0
+            gait_duration = 0.5
+            swing_height = 0.03
             gait_indices = (gait_indices + gait_freq * dt_policy) % 1.0
 
             foot_indices = np.array([

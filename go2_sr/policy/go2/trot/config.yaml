@@ -4,7 +4,17 @@
 go2/trot:
   model_name: "policy_1.pt"
   num_observations: 59
-  observations: ["ang_vel", "sin_pos", "cos_pos", "commands", "dof_pos", "dof_vel", "base_euler_xyz", "actions", "last_actions"]
+  observations: [
+        "ang_vel", 
+        "sin_pos", 
+        "cos_pos", 
+        "commands", 
+        "dof_pos", 
+        "dof_vel", 
+        "base_euler_xyz", 
+        "actions", 
+        "last_actions"
+  ]
   observations_history: []  # 0 is the latest observation
   observations_history_priority: "time"  # "time" or "term" priority
   clip_obs: 100.0

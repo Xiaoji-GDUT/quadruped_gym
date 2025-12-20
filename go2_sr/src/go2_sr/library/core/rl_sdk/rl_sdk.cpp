@@ -1,5 +1,9 @@
 #include "rl_sdk.hpp"
 
+#ifndef POLICY_DIR
+#define POLICY_DIR "/path/to/policy/dir"
+#endif
+
 void RL::StateController(const RobotState<float>* state, RobotCommand<float>* command){
     auto updataState = [&](std::shared_ptr<FSMState> statePtr){
         if (auto rl_fsm_state = std::dynamic_pointer_cast<RLFSMState>(statePtr)){
@@ -44,8 +48,12 @@ void RL::StateController(const RobotState<float>* state, RobotCommand<float>* co
 std::vector<float> RL::ComputeObservation(){
     std::vector<std::vector<float>> obs_list;
     for (const std::string &observation : this->params.Get<std::vector<std::string>>("observations")){
+        // projected_gravity
+        if (observation == "projected_gravity"){
+            obs_list.push_back(this->obs.projected_gravity);
+        }
         // lin_vel
-        if (observation == "lin_vel"){
+        else if (observation == "lin_vel"){
             obs_list.push_back(this->obs.lin_vel * this->params.Get<float>("lin_vel_scale"));            
         }
         // ang_vel
@@ -65,6 +73,42 @@ std::vector<float> RL::ComputeObservation(){
         else if (observation == "commands"){
            obs_list.push_back(this->obs.commands * this->params.Get<std::vector<float>>("commands_scale")); 
         }
+        // body_height_cmd
+        else if (observation == "body_height_cmd"){
+            obs_list.push_back({this->obs.body_height_cmd * this->params.Get<float>("body_height_cmd_scale")});
+        }
+        // gait_freq_cmd
+        else if (observation == "gait_freq_cmd"){
+            obs_list.push_back({this->obs.gait_freq_cmd * this->params.Get<float>("gait_freq_cmd_scale")});
+        }
+        // gait_phase_cmd
+        else if (observation == "gait_phase_cmd"){
+            obs_list.push_back({this->obs.gait_phase_cmd * this->params.Get<float>("gait_phase_cmd_scale")});
+        }
+        // gait_offset_cmd
+        else if (observation == "gait_offset_cmd"){
+            obs_list.push_back({this->obs.gait_offset_cmd * this->params.Get<float>("gait_phase_cmd_scale")});
+        }
+        // gait_bound_cmd
+        else if (observation == "gait_bound_cmd"){
+            obs_list.push_back({this->obs.gait_bound_cmd * this->params.Get<float>("gait_phase_cmd_scale")});
+        }
+        // gait_duration_cmd
+        else if (observation == "gait_duration_cmd"){
+            obs_list.push_back({this->obs.gait_duration_cmd * this->params.Get<float>("gait_phase_cmd_scale")});
+        }
+        // footswing_height_cmd
+        else if (observation == "footswing_height_cmd"){
+            obs_list.push_back({this->obs.footswing_height_cmd * this->params.Get<float>("footswing_height_cmd_scale")});
+        }
+        // body_pitch_cmd
+        else if (observation == "body_pitch_cmd"){
+            obs_list.push_back({this->obs.body_pitch_cmd * this->params.Get<float>("body_pitch_cmd_scale")});
+        }
+        // body_roll_cmd
+        else if (observation == "body_roll_cmd"){
+            obs_list.push_back({this->obs.body_roll_cmd * this->params.Get<float>("body_roll_cmd_scale")});
+        }
         // dof_pos
         else if (observation == "dof_pos"){
             std::vector<float> dof_pos_rel = this->obs.dof_pos - this->params.Get<std::vector<float>>("default_dof_pos");
@@ -81,16 +125,27 @@ std::vector<float> RL::ComputeObservation(){
         else if (observation == "actions"){
             obs_list.push_back(this->obs.actions);
         }
-        // ============= Other Observations =============
+        // last_actions
         else if (observation == "last_actions"){
             obs_list.push_back(this->obs.last_actions);
         }
+        // gait_indices
+        else if (observation == "gait_indices"){
+            obs_list.push_back({this->obs.gait_indices});
+        }
+        // clock_inputs
+        else if (observation == "clock_inputs"){
+            obs_list.push_back(this->obs.clock_inputs);
+        }
+        // sin_pos
         else if (observation == "sin_pos"){
             obs_list.push_back(this->obs.sin_pos);
         }
+        // cos_pos
         else if (observation == "cos_pos"){
             obs_list.push_back(this->obs.cos_pos);
         }
+        // base_euler_xyz
         else if (observation == "base_euler_xyz"){
             std::vector<float> euler = QuaternionToEuler(this->obs.base_quat);
             obs_list.push_back(euler * this->params.Get<float>("quat_scale"));
@@ -112,19 +167,34 @@ void RL::InitObservations(){
     this->obs.lin_vel = {0.0f, 0.0f, 0.0f};
     this->obs.ang_vel = {0.0f, 0.0f, 0.0f};
     this->obs.gravity_vec = {0.0f, 0.0f, -1.0f};
+    this->obs.projected_gravity = {0.0f, 0.0f, -1.0f};
     this->obs.commands = {0.0f, 0.0f, 0.0f};
-    this->obs.base_quat = {0.0f, 0.0f, 0.0f, 1.0f};
+    this->obs.base_quat = {1.0f, 0.0f, 0.0f, 0.0f};
     this->obs.dof_pos = this->params.Get<std::vector<float>>("default_dof_pos");
     this->obs.dof_vel.clear();
     this->obs.dof_vel.resize(this->params.Get<int>("num_of_dofs"), 0.0f);
     this->obs.actions.clear();
     this->obs.actions.resize(this->params.Get<int>("num_of_dofs"), 0.0f);
-    // custom observations can be initialized here
-    this->obs.sin_pos = {0.0f};
-    this->obs.cos_pos = {0.0f};
-    this->obs.base_euler_xyz = {0.0f, 0.0f, 0.0f};
-    this->obs.last_actions.clear();
-    this->obs.last_actions.resize(this->params.Get<int>("num_of_dofs"), 0.0f);
+    // this->obs.last_actions.clear();
+    // this->obs.last_actions.resize(this->params.Get<int>("num_of_dofs"), 0.0f);
+
+    // add new observations
+    this->obs.body_height_cmd = this->params.Get<float>("body_height");
+    this->obs.gait_freq_cmd = this->params.Get<float>("gait_freq");
+    this->obs.gait_phase_cmd = this->params.Get<float>("gait_phase");
+    this->obs.gait_offset_cmd = this->params.Get<float>("gait_offset");
+    this->obs.gait_bound_cmd = this->params.Get<float>("gait_bound");
+    this->obs.gait_duration_cmd = this->params.Get<float>("gait_duration");
+    this->obs.footswing_height_cmd = this->params.Get<float>("swing_height");
+    this->obs.body_pitch_cmd = this->params.Get<float>("body_pitch");
+    this->obs.body_roll_cmd = this->params.Get<float>("body_roll");
+    this->obs.gait_indices = 0.0f;
+    this->obs.clock_inputs = {0.0f, 0.0f, 0.0f, 0.0f};
+    
+    // this->obs.sin_pos = {0.0f};
+    // this->obs.cos_pos = {0.0f};
+    // this->obs.base_euler_xyz = {0.0f, 0.0f, 0.0f};
+    
     this->ComputeObservation();
 }
 
@@ -371,37 +441,6 @@ void RL::ReadYaml(const std::string& file_path, const std::string& file_name){
         std::string key = it->first.as<std::string>();
         this->params.config_node[key] = it->second;
     }
-}
-
-void RL::CSVInit(std::string robot_path){
-    csv_filename = std::string(POLICY_DIR) + "/" + robot_path + "/motor";
-
-    csv_filename += ".csv";
-    std::ofstream file(csv_filename.c_str());
-
-    for(int i = 0; i < this->params.Get<int>("num_of_dofs"); ++i) { file << "tau_cal_" << i << ","; }
-    for(int i = 0; i < this->params.Get<int>("num_of_dofs"); ++i) { file << "tau_est_" << i << ","; }
-    for(int i = 0; i < this->params.Get<int>("num_of_dofs"); ++i) { file << "joint_pos_" << i << ","; }
-    for(int i = 0; i < this->params.Get<int>("num_of_dofs"); ++i) { file << "joint_pos_target_" << i << ","; }
-    for(int i = 0; i < this->params.Get<int>("num_of_dofs"); ++i) { file << "joint_vel_" << i << ","; }
-
-    file << std::endl;
-
-    file.close();
-}
-
-void RL::CSVLogger(const std::vector<float>& torque, const std::vector<float>& tau_est, const std::vector<float>& joint_pos, const std::vector<float>& joint_pos_target, const std::vector<float>& joint_vel){
-    std::ofstream file(csv_filename.c_str(), std::ios_base::app);
-
-    for(int i = 0; i < this->params.Get<int>("num_of_dofs"); ++i) { file << torque[i] << ","; }
-    for(int i = 0; i < this->params.Get<int>("num_of_dofs"); ++i) { file << tau_est[i] << ","; }
-    for(int i = 0; i < this->params.Get<int>("num_of_dofs"); ++i) { file << joint_pos[i] << ","; }
-    for(int i = 0; i < this->params.Get<int>("num_of_dofs"); ++i) { file << joint_pos_target[i] << ","; }
-    for(int i = 0; i < this->params.Get<int>("num_of_dofs"); ++i) { file << joint_vel[i] << ","; }
-
-    file << std::endl;
-
-    file.close();
 }
 
 bool RLFSMState::Interpolate(

@@ -127,6 +127,19 @@ struct Observations{
     std::vector<T> last_actions;
     std::vector<T> base_euler_xyz;
 
+    // add walk_these_ways observations
+    std::vector<T> projected_gravity;
+    T body_height_cmd;
+    T gait_freq_cmd;
+    T gait_phase_cmd;
+    T gait_offset_cmd;
+    T gait_bound_cmd;
+    T gait_duration_cmd;
+    T footswing_height_cmd;
+    T body_pitch_cmd;
+    T body_roll_cmd;
+    T gait_indices;
+    std::vector<T> clock_inputs;  // 4
 };
 
 class RL{
@@ -167,11 +180,6 @@ public:
     // yaml params
     void ReadYaml(const std::string& file_path, const std::string& file_name);
 
-    // csv logger
-    std::string csv_filename;
-    void CSVInit(std::string robot_name);
-    void CSVLogger(const std::vector<float> &torque, const std::vector<float> &tau_est, const std::vector<float> &joint_pos, const std::vector<float> &joint_pos_target, const std::vector<float> &joint_vel);
-
     // control
     Control control;
     void KeyboardInterface();
@@ -192,7 +200,6 @@ public:
     // protect func
     void TorqueProtect(const std::vector<float> &origin_output_dof_tau);
     void AttitudeProtect(const std::vector<float> &quaternion, float pitch_threshold, float roll_threshold);
-
 
     //rl module
     std::unique_ptr<InferenceRuntime::Model> model;

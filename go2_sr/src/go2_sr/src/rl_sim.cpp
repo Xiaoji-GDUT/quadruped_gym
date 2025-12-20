@@ -172,25 +172,72 @@ void RL_Sim::JointStatesCallback(const robot_msgs::MotorState::ConstPtr &msg, co
 void RL_Sim::RunModel(){
     if (this->rl_init_done && simulation_running){
         this->episode_length_buf += 1;
+        
+        // 更新基础观测
         this->obs.ang_vel = this->robot_state.imu.gyroscope;
-        this->obs.commands = {this->control.x, this->control.y, this->control.yaw};
-        if (this->control.navigation_mode){
-            this->obs.commands = {(float)this->cmd_vel.linear.x, (float)this->cmd_vel.linear.y, (float)this->cmd_vel.angular.z};
-        }
         this->obs.base_quat = this->robot_state.imu.quaternion;
         this->obs.dof_pos = this->robot_state.motor_state.q;
         this->obs.dof_vel = this->robot_state.motor_state.dq;
         this->obs.last_actions = this->obs.actions;
-
+        
+        // 计算projected_gravity
+        this->obs.projected_gravity = QuatRotateInverse(this->obs.base_quat, this->obs.gravity_vec);
+        
+        // 更新命令
+        this->obs.commands = {this->control.x, this->control.y, this->control.yaw};
+        if (this->control.navigation_mode){
+            this->obs.commands = {(float)this->cmd_vel.linear.x, (float)this->cmd_vel.linear.y, (float)this->cmd_vel.angular.z};
+        }
+        
+        // 更新步态参数
+        this->obs.body_height_cmd = this->params.Get<float>("body_height");
+        this->obs.gait_freq_cmd = this->params.Get<float>("gait_freq");
+        this->obs.gait_phase_cmd = this->params.Get<float>("gait_phase");
+        this->obs.gait_offset_cmd = this->params.Get<float>("gait_offset");
+        this->obs.gait_bound_cmd = this->params.Get<float>("gait_bound");
+        this->obs.gait_duration_cmd = this->params.Get<float>("gait_duration");
+        this->obs.footswing_height_cmd = this->params.Get<float>("swing_height");
+        this->obs.body_pitch_cmd = this->params.Get<float>("body_pitch");
+        this->obs.body_roll_cmd = this->params.Get<float>("body_roll");
+        
+        // 计算步态索引和时钟输入
         float dt = this->params.Get<float>("dt") * this->params.Get<int>("decimation");
-        float cycle_time = 0.5f; 
-        float current_time = this->episode_length_buf * dt;
-        float phase = std::fmod(current_time, cycle_time) / cycle_time;
-
-        this->obs.sin_pos = {static_cast<float>(std::sin(2 * M_PI * phase))};
-        this->obs.cos_pos = {static_cast<float>(std::cos(2 * M_PI * phase))};
+        float gait_freq = this->obs.gait_freq_cmd;
+        float gait_phase = this->obs.gait_phase_cmd;
+        float gait_offset = this->obs.gait_offset_cmd;
+        float gait_bound = this->obs.gait_bound_cmd;
+        float gait_duration = this->obs.gait_duration_cmd;
+        
+        this->obs.gait_indices = std::fmod(this->obs.gait_indices + gait_freq * dt, 1.0f);
+        
+        // 计算四足的相位
+        std::vector<float> foot_indices(4);
+        foot_indices[0] = std::fmod(this->obs.gait_indices + gait_phase + gait_offset + gait_bound, 1.0f);  // FL
+        foot_indices[1] = std::fmod(this->obs.gait_indices + gait_offset, 1.0f);  // RL
+        foot_indices[2] = std::fmod(this->obs.gait_indices + gait_bound, 1.0f);  // FR
+        foot_indices[3] = std::fmod(this->obs.gait_indices + gait_phase, 1.0f);  // RR
+        
+        // 转换相位到时钟输入
+        std::vector<float> transformed_indices(4);
+        for (int i = 0; i < 4; ++i){
+            float phase = foot_indices[i];
+            if (phase < gait_duration){
+                transformed_indices[i] = phase * (0.5f / gait_duration);
+            } else {
+                transformed_indices[i] = 0.5f + (phase - gait_duration) * (0.5f / (1.0f - gait_duration));
+            }
+        }
+        
+        // 计算时钟输入（sin值）
+        this->obs.clock_inputs.resize(4);
+        for (int i = 0; i < 4; ++i){
+            this->obs.clock_inputs[i] = std::sin(2.0f * M_PI * transformed_indices[i]);
+        }
+        
+        // 执行推理
         this->obs.actions = this->Forward();
         this->ComputeOutput(this->obs.actions, this->output_dof_pos, this->output_dof_vel, this->output_dof_tau);
+        
         if (!this->output_dof_pos.empty()){
             output_dof_pos_queue.push(this->output_dof_pos);
         }

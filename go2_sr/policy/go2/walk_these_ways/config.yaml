@@ -1,0 +1,92 @@
+# Copyright (c) 2024-2025 Ziqi Fan
+# SPDX-License-Identifier: Apache-2.0
+
+go2/walk_these_ways:
+  model_name: "policy_1.pt"
+  num_observations: 68
+  observations: [
+    "projected_gravity",
+    "commands", 
+    "body_height_cmd",
+    "gait_freq_cmd",
+    "gait_phase_cmd", 
+    "gait_offset_cmd",
+    "gait_bound_cmd",
+    "gait_duration_cmd",
+    "footswing_height_cmd",
+    "body_pitch_cmd",
+    "body_roll_cmd",
+    "dof_pos",
+    "dof_vel",
+    "actions",
+    "last_actions",
+    "gait_indices",
+    "clock_inputs"
+  ]
+  observations_history: []
+  observations_history_priority: "time"
+  clip_obs: 100.0
+  
+  # 观测缩放参数
+  lin_vel_scale: 1.0
+  ang_vel_scale: 1.0
+  dof_pos_scale: 1.0
+  dof_vel_scale: 0.05
+  body_height_cmd_scale: 1.0
+  gait_freq_cmd_scale: 1.0
+  gait_phase_cmd_scale: 1.0
+  footswing_height_cmd_scale: 1.0
+  body_pitch_cmd_scale: 1.0
+  body_roll_cmd_scale: 1.0
+  
+  # 步态参数
+  gait_freq: 3.0
+  gait_phase: 0.5
+  gait_offset: 0.0
+  gait_bound: 0.0
+  gait_duration: 0.5
+  swing_height: 0.03
+  body_pitch: 0.0
+  body_roll: 0.0
+  body_height: 0.34
+  
+  clip_actions_lower: [-100.0, -100.0, -100.0,
+                       -100.0, -100.0, -100.0,
+                       -100.0, -100.0, -100.0,
+                       -100.0, -100.0, -100.0]
+  clip_actions_upper: [100.0, 100.0, 100.0,
+                       100.0, 100.0, 100.0,
+                       100.0, 100.0, 100.0,
+                       100.0, 100.0, 100.0]
+  rl_kp: [25.0, 25.0, 25.0,
+          25.0, 25.0, 25.0,
+          25.0, 25.0, 25.0,
+          25.0, 25.0, 25.0]
+  rl_kd: [0.6, 0.6, 0.6,
+          0.6, 0.6, 0.6,
+          0.6, 0.6, 0.6,
+          0.6, 0.6, 0.6]
+  fixed_kp: [80.0, 80.0, 80.0,
+             80.0, 80.0, 80.0,
+             80.0, 80.0, 80.0,
+             80.0, 80.0, 80.0]
+  fixed_kd: [3.0, 3.0, 3.0,
+             3.0, 3.0, 3.0,
+             3.0, 3.0, 3.0,
+             3.0, 3.0, 3.0]
+  num_of_dofs: 12
+  action_scale: [0.25, 0.25, 0.25,
+                 0.25, 0.25, 0.25,
+                 0.25, 0.25, 0.25,
+                 0.25, 0.25, 0.25]
+  wheel_indices: []
+  commands_scale: [1.0, 1.0, 1.0]
+  torque_limits: [40.0, 40.0, 40.0,
+                  40.0, 40.0, 40.0,
+                  40.0, 40.0, 40.0,
+                  40.0, 40.0, 40.0]
+  default_dof_pos: [0.0, 0.8, -1.5,
+                    0.0, 0.8, -1.5,
+                    0.0, 0.8, -1.5,
+                    0.0, 0.8, -1.5]
+  joint_mapping: [3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8]

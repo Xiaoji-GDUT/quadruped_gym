@@ -158,13 +158,13 @@ if __name__ == '__main__':
         class sim_config:
             mujoco_model_path = args.mujoco_model
             sim_duration = 120.
-            dt = 0.0005
+            dt = 0.001
             decimation = 20
         
         class robot_config:
             kps = np.array([20.0] * 12, dtype=np.double)  # 与Isaac Gym保持一致：25.0
             kds = np.array([0.5] * 12, dtype=np.double)   # 与Isaac Gym保持一致：0.6
-            tau_limit = 20 * np.ones(12, dtype=np.double)
+            tau_limit = 40 * np.ones(12, dtype=np.double)
             default_dof_pos = np.array([
                 0.0, 0.8, -1.5,   # FL
                 0.0, 0.8, -1.5,   # RL

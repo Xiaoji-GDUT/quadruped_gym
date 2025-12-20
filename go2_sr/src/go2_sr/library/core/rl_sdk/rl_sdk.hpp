@@ -121,6 +121,12 @@ struct Observations{
     std::vector<T> dof_pos;
     std::vector<T> dof_vel;
     std::vector<T> actions;
+    // other custom observations can be added here
+    std::vector<T> sin_pos;
+    std::vector<T> cos_pos;
+    std::vector<T> last_actions;
+    std::vector<T> base_euler_xyz;
+
 };
 
 class RL{

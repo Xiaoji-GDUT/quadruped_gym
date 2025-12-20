@@ -162,7 +162,7 @@ class Go2TrotRobot( LeggedRobot ):
             self.base_euler_xyz * self.obs_scales.quat, # 3
             self.actions, # 12
             self.last_actions # 12
-        ), dim=-1)
+        ), dim=-1) # 59
         
         self.privileged_obs_buf = torch.cat((
             self.base_lin_vel *self.obs_scales.lin_vel, # 3
@@ -177,7 +177,7 @@ class Go2TrotRobot( LeggedRobot ):
             self.last_actions, # 12
             stance_mask, # 2
             contact_mask # 2
-        ), dim=-1)
+        ), dim=-1) # 77
 
         if self.add_noise:  
             self.obs_buf += (2 * torch.rand_like(self.obs_buf) - 1) * self.noise_scale_vec

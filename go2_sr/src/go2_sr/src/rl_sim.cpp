@@ -64,9 +64,6 @@ RL_Sim::RL_Sim(int argc, char **argv){
     this->loop_keyboard = std::make_shared<LoopFunc>("loop_keyboard", 0.05, std::bind(&RL_Sim::KeyboardInterface, this));
     this->loop_keyboard->start();
 
-#ifdef CSV_LOGGER
-    this->CSVInit(this->robot_name);
-#endif
     std::cout << LOGGER::INFO << "RL_Sim start" << std::endl;
 }
 
@@ -76,7 +73,7 @@ RL_Sim::~RL_Sim(){
     this->loop_rl->shutdown();
     std::cout << LOGGER::INFO << "RL_Sim exit" << std::endl;
 }
-
+// Start joint controllers in Gazebo simulation
 void RL_Sim::StartJointController(const std::string& ros_namespace, const std::vector<std::string>& name){
     pid_t pid0 = fork();
     if (pid0 == 0){
@@ -91,6 +88,7 @@ void RL_Sim::StartJointController(const std::string& ros_namespace, const std::v
     }
 }
 
+//Get the current state of the robot from Gazebo simulation
 void RL_Sim::GetState(RobotState<float> *state){
     const auto &orientation = this->pose.orientation;
     const auto &angular_velocity = this->vel.angular;
@@ -125,15 +123,17 @@ void RL_Sim::SetCommand(const RobotCommand<float> *command){
 }
 
 void RL_Sim::RobotControl(){
+    // update robot state
     this->GetState(&this->robot_state);
-
+    // state controller
     this->StateController(&this->robot_state, &this->robot_command);
-
+    // reset simulation
     if (this->control.current_key == Input::Keyboard::R){
         std_srvs::Empty empty;
         this->gazebo_reset_world_client.call(empty);
         this->control.current_key = this->control.last_key;
     }
+    // pause/unpause simulation
     if (this->control.current_key == Input::Keyboard::Enter){
         if (simulation_running){
             std_srvs::Empty empty;
@@ -148,26 +148,27 @@ void RL_Sim::RobotControl(){
         simulation_running = !simulation_running;
         this->control.current_key = this->control.last_key;
     }
+    // clear input
     this->control.ClearInput();
-
+    // send command to robot
     this->SetCommand(&this->robot_command);
 }
-
+// Callback function to receive model states from Gazebo
 void RL_Sim::ModelStatesCallback(const gazebo_msgs::ModelStates::ConstPtr &msg){
     this->vel = msg->twist[2];
     this->pose = msg->pose[2];
 }
-
+// Callback function to receive cmd_vel messages
 void RL_Sim::CmdvelCallback(const geometry_msgs::Twist::ConstPtr &msg){
     this->cmd_vel = *msg;
 }
-
+// Callback function to receive joint states messages
 void RL_Sim::JointStatesCallback(const robot_msgs::MotorState::ConstPtr &msg, const std::string &joint_controller_name){
     this->joint_positions[joint_controller_name] = msg->q;
     this->joint_velocities[joint_controller_name] = msg->dq;
     this->joint_efforts[joint_controller_name] = msg->tau_est;
 }
-
+// Run the RL model to compute actions and update outputs
 void RL_Sim::RunModel(){
     if (this->rl_init_done && simulation_running){
         this->episode_length_buf += 1;
@@ -179,6 +180,15 @@ void RL_Sim::RunModel(){
         this->obs.base_quat = this->robot_state.imu.quaternion;
         this->obs.dof_pos = this->robot_state.motor_state.q;
         this->obs.dof_vel = this->robot_state.motor_state.dq;
+        this->obs.last_actions = this->obs.actions;
+
+        float dt = this->params.Get<float>("dt") * this->params.Get<int>("decimation");
+        float cycle_time = 0.5f; 
+        float current_time = this->episode_length_buf * dt;
+        float phase = std::fmod(current_time, cycle_time) / cycle_time;
+
+        this->obs.sin_pos = {static_cast<float>(std::sin(2 * M_PI * phase))};
+        this->obs.cos_pos = {static_cast<float>(std::cos(2 * M_PI * phase))};
         this->obs.actions = this->Forward();
         this->ComputeOutput(this->obs.actions, this->output_dof_pos, this->output_dof_vel, this->output_dof_tau);
         if (!this->output_dof_pos.empty()){
@@ -190,16 +200,9 @@ void RL_Sim::RunModel(){
         if (!this->output_dof_tau.empty()){
             output_dof_tau_queue.push(this->output_dof_tau);
         }
-#ifdef CSV_LOGGER
-        std::vector<float> tau_est(this->params.Get<int>("num_of_dofs"), 0.0f);
-        for (int i = 0; i < this->params.Get<int>("num_of_dofs"); ++i){
-            tau_est[i] = this->joint_efforts[this->params.Get<std::vector<std::string>>("joint_controller_names")[i]];
-        }
-        this->CSVLogger(this->output_dof_tau, tau_est, this->obs.dof_pos, this->output_dof_pos, this->obs.dof_vel);
-#endif
     }
 }
-
+// Compute actions using the RL model based on current observations
 std::vector<float> RL_Sim::Forward(){
     std::unique_lock<std::mutex> lock(this->model_mutex, std::try_to_lock);
     if (!lock.owns_lock()){
@@ -218,6 +221,7 @@ std::vector<float> RL_Sim::Forward(){
     else{
         actions = this->model->forward({clamped_obs});
     }
+    // clamp actions
     if (!this->params.Get<std::vector<float>>("clip_actions_upper").empty() && !this->params.Get<std::vector<float>>("clip_actions_lower").empty()){
         return clamp(actions, this->params.Get<std::vector<float>>("clip_actions_lower"), this->params.Get<std::vector<float>>("clip_actions_upper"));
     }
@@ -225,12 +229,12 @@ std::vector<float> RL_Sim::Forward(){
         return actions;
     }
 }
-
+// shutdown handler
 void signalHandler(int signum){
     ros::shutdown();
     exit(0);
 }
-
+// main
 int main(int argc, char **argv){
     signal(SIGINT, signalHandler);
     ros::init(argc, argv, "go2_sr");

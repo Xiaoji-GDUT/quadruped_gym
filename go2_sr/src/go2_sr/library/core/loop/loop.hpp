@@ -86,7 +86,6 @@ private:
     }
 
     void setThreadAffinity(std::thread::native_handle_type threadHandle, int cpuId){
-#ifdef __linux__
         cpu_set_t cpuset;
         CPU_ZERO(&cpuset);
         CPU_SET(cpuId, &cpuset);
@@ -95,10 +94,6 @@ private:
             oss << "Error setting thread affinity: CPU " << cpuId << " may not be valid or accessible.";
             throw std::runtime_error(oss.str());
         }
-#else
-        // Thread affinity not supported on this platform
-        std::cout << LOGGER::WARNING << "Thread affinity not supported on this platform" << std::endl;
-#endif
     }
 };
 

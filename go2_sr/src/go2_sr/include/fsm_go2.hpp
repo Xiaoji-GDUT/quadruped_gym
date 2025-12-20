@@ -157,7 +157,7 @@ public:
         rl.episode_length_buf = 0;
 
         // read params from yaml
-        rl.config_name = "himloco";
+        rl.config_name = "trot";
         std::string robot_config_path = rl.robot_name + "/" + rl.config_name;
         try
         {

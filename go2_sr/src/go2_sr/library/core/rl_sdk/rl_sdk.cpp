@@ -82,6 +82,19 @@ std::vector<float> RL::ComputeObservation(){
             obs_list.push_back(this->obs.actions);
         }
         // ============= Other Observations =============
+        else if (observation == "last_actions"){
+            obs_list.push_back(this->obs.last_actions);
+        }
+        else if (observation == "sin_pos"){
+            obs_list.push_back(this->obs.sin_pos);
+        }
+        else if (observation == "cos_pos"){
+            obs_list.push_back(this->obs.cos_pos);
+        }
+        else if (observation == "base_euler_xyz"){
+            std::vector<float> euler = QuaternionToEuler(this->obs.base_quat);
+            obs_list.push_back(euler * this->params.Get<float>("quat_scale"));
+        }
     }
     this->obs_dims.clear();
     for (const auto& obs : obs_list){
@@ -106,6 +119,12 @@ void RL::InitObservations(){
     this->obs.dof_vel.resize(this->params.Get<int>("num_of_dofs"), 0.0f);
     this->obs.actions.clear();
     this->obs.actions.resize(this->params.Get<int>("num_of_dofs"), 0.0f);
+    // custom observations can be initialized here
+    this->obs.sin_pos = {0.0f};
+    this->obs.cos_pos = {0.0f};
+    this->obs.base_euler_xyz = {0.0f, 0.0f, 0.0f};
+    this->obs.last_actions.clear();
+    this->obs.last_actions.resize(this->params.Get<int>("num_of_dofs"), 0.0f);
     this->ComputeObservation();
 }
 

@@ -2,12 +2,12 @@ from legged_gym.envs.base.legged_robot_config import LeggedRobotCfg, LeggedRobot
 
 class Go2StairsCfg( LeggedRobotCfg ):
     class env:
-        num_envs = 4096
+        num_envs = 1024
         num_observations = 57
         num_privileged_obs = 247
         num_actions = 12
         episode_length_s = 24 # episode length in seconds
-        env_spacing = 3.  # not used with heightfields/trimeshes 
+        env_spacing = 3.  # not used with heightfields/trimeshes
         send_timeouts=True
 
     class terrain:
@@ -34,7 +34,7 @@ class Go2StairsCfg( LeggedRobotCfg ):
         terrain_proportions = [0.15, 0.15, 0.7, 0.0, 0.0]
         # trimesh only:
         slope_treshold = 0.75 # slopes above this threshold will be corrected to vertical surfaces
-    
+
     class commands:
         curriculum = False
         max_curriculum = 2.0
@@ -92,7 +92,7 @@ class Go2StairsCfg( LeggedRobotCfg ):
         self_collisions = 0 # 1 to disable, 0 to enable...bitwise filter
         replace_cylinder_with_capsule = True # replace collision cylinders with capsules, leads to faster/more stable simulation
         flip_visual_attachments = True # Some .obj meshes must be flipped from y-up to z-up
-    
+
         density = 0.001
         angular_damping = 0.
         linear_damping = 0.
@@ -135,7 +135,7 @@ class Go2StairsCfg( LeggedRobotCfg ):
             ang_vel_xy = -0.5
             orientation = -0.2
             base_height = -100.0
-            torques = -0.0001 
+            torques = -0.0001
             dof_acc = -1.5e-7
             dof_vel = -1e-4
             collision = -100.
@@ -222,7 +222,7 @@ class Go2StairsCfgPPO( LeggedRobotCfgPPO ):
         policy_class_name = 'ActorCritic'
         algorithm_class_name = 'PPO'
         num_steps_per_env = 24 # per iteration
-        max_iterations = 30000 # number of policy updates
+        max_iterations = 50000 # number of policy updates
         # logging
         save_interval = 100 # check for potential saves every this many iterations
         experiment_name = 'go2_stairs'

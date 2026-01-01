@@ -36,48 +36,88 @@ class Go2TrotRobot( LeggedRobot ):
         self.init_done = True
 
     def step(self, actions):
+        # 读配置里的动作幅度上限。神经网络输出通常是无界的，需要截断以保护电机。
         clip_actions = self.cfg.normalization.clip_actions
+        # 将动作裁剪到 [-clip, clip] 范围内，并确保数据在正确的设备（GPU/CPU）上。
         self.actions = torch.clip(actions, -clip_actions, clip_actions).to(self.device)
-        self.render()
+        self.render() # 可视化渲染
+
+        # 物理仿真循环
+        # 假设控制频率（RL策略频率）是 50Hz，物理仿真频率是 200Hz。
+        # 那么 decimation = 4。意味着策略输出一次动作，PD控制器要在物理引擎里执行 4 次。
         for _ in range(self.cfg.control.decimation):
+            # 模拟通信延迟（真实机器人上，指令发送到执行有延时），这里虽然被注释了，但 Sim2Real 时很重要。
             # action_delayed = self.update_cmd_action_latency_buffer() #TODO
+
+            # 将神经网络输出的“动作”（通常是目标关节角度）转换为“力矩”。
+            # 底层通常是一个 KP/KD (PD) 控制器： Torque = Kp*(target - current) - Kd*vel
             self.torques = self._compute_torques(self.actions).view(self.torques.shape)
+
+            # 应用力矩并推进物理引擎一步。
             self.gym.set_dof_actuation_force_tensor(self.sim, gymtorch.unwrap_tensor(self.torques))
             self.gym.simulate(self.sim)
             if self.device == 'cpu':
                 self.gym.fetch_results(self.sim, True)
+            # 更新物理引擎状态
             self.gym.refresh_dof_state_tensor(self.sim)
+
+            # 模拟观测延迟（传感器数据读回来也是有延时的）
             # self.update_obs_latency_buffer() #TODO
+
+        # 所有物理子步都跑完了，现在处理这一帧的 RL 数据
         self.post_physics_step()
 
+        # 对观测数据进行限幅，模拟传感器量程，防止异常值破坏神经网络训练
         clip_obs = self.cfg.normalization.clip_observations
         self.obs_buf = torch.clip(self.obs_buf, -clip_obs, clip_obs)
         if self.privileged_obs_buf is not None:
             self.privileged_obs_buf = torch.clip(self.privileged_obs_buf, -clip_obs, clip_obs)
+
+        # 返回给 PPO 算法的数据：
+        # obs_buf: 策略网络(Actor)看的输入
+        # privileged_obs_buf: 价值网络(Critic)看的输入（包含上帝视角信息）
+        # rew_buf: 本次 step 的奖励
+        # reset_buf: 哪些环境(机器狗)倒了需要重置
+        # extras: 额外的日志信息
         return self.obs_buf, self.privileged_obs_buf, self.rew_buf, self.reset_buf, self.extras
 
+
     def post_physics_step(self):
+        """
+        物理步进完成后的回调。
+        主要任务：更新刚体状态、计算奖励、处理重置、计算观测。
+        """
+        # 刷新各种物理引擎的 Tensor（GPU内存中的数据），包括基座状态、接触力等
         self.gym.refresh_actor_root_state_tensor(self.sim)
         self.gym.refresh_net_contact_force_tensor(self.sim)
         self.gym.refresh_rigid_body_state_tensor(self.sim)
 
+        # 计数器 +1
         self.episode_length_buf += 1
         self.common_step_counter += 1
 
+        # --- 状态更新与坐标转换 ---
+        # 获取基座（身体）的四元数姿态
         self.base_quat[:] = self.root_states[:, 3:7]
         self.base_lin_vel[:] = quat_rotate_inverse(self.base_quat, self.root_states[:, 7:10])
         self.base_ang_vel[:] = quat_rotate_inverse(self.base_quat, self.root_states[:, 10:13])
         self.projected_gravity[:] = quat_rotate_inverse(self.base_quat, self.gravity_vec)
         self.base_euler_xyz = get_euler_xyz_tensor(self.base_quat)
 
+        # 某些特定环境的额外回调
         self._post_physics_step_callback()
 
-        self.check_termination()
-        self.compute_reward()
+        self.check_termination()  # 检查是否倒地或超时
+        self.compute_reward()     # 计算这一步得了多少分
+
+        # 处理环境重置（如果 check_termination 判定需要重置）
         env_ids = self.reset_buf.nonzero(as_tuple=False).flatten()
         self.reset_idx(env_ids)
+
+        # 计算下一步的观测值（Obs），准备传给神经网络
         self.compute_observations()
 
+        # 更新历史记录（上一帧动作等），用于模拟惯性和延迟
         self.last_actions[:] = self.actions[:]
         self.last_dof_vel[:] = self.dof_vel[:]
         self.last_root_vel[:] = self.root_states[:, 7:13]
@@ -130,7 +170,7 @@ class Go2TrotRobot( LeggedRobot ):
         #     self.obs_history[i][env_ids] *= 0
         # for i in range(self.critic_history.maxlen):
         #     self.critic_history[i][env_ids] *= 0
-        
+
     def compute_reward(self):
         self.rew_buf[:] = 0.
         for i in range(len(self.reward_functions)):
@@ -145,25 +185,34 @@ class Go2TrotRobot( LeggedRobot ):
             rew = self._reward_termination() * self.reward_scales["termination"]
             self.rew_buf += rew
             self.episode_sums["termination"] += rew
-    
+
     def compute_observations(self):
+        """
+        构造观测向量。这是 Sim2Real 最关键的一步。
+        这里的数据必须是真实机器人上有传感器能读到的，或者是能估算出来的。
+        """
+        # 引入步态相位信息（用于形成期望支撑）
         phase = self._get_phase()
         sin_pos = torch.sin(2 * torch.pi * phase).unsqueeze(1)
         cos_pos = torch.cos(2 * torch.pi * phase).unsqueeze(1)
+        # 步态掩码：基于时间的期望支撑腿
         stance_mask = self._get_gait_phase()
+        # 接触掩码：基于物理引擎的实际接触情况
         contact_mask = self.contact_forces[:, self.feet_indices, 2] > 5.
+
+        # 拼接观测向量
         self.obs_buf = torch.cat((
-            self.base_ang_vel * self.obs_scales.ang_vel, # 3
+            self.base_ang_vel * self.obs_scales.ang_vel, # 3 imu 角速度
             sin_pos, # 1
             cos_pos, # 1
-            self.commands[:, :3] * self.commands_scale, # 3
-            (self.dof_pos - self.default_dof_pos) * self.obs_scales.dof_pos, # 12
-            self.dof_vel * self.obs_scales.dof_vel, # 12
-            self.base_euler_xyz * self.obs_scales.quat, # 3
-            self.actions, # 12
-            self.last_actions # 12
+            self.commands[:, :3] * self.commands_scale, # 3 期望速度
+            (self.dof_pos - self.default_dof_pos) * self.obs_scales.dof_pos, # 12 关节误差
+            self.dof_vel * self.obs_scales.dof_vel, # 12 关节速度
+            self.base_euler_xyz * self.obs_scales.quat, # 3 姿态角(imu积分或陀螺仪测量)
+            self.actions, # 12  历史动作 (t-1)
+            self.last_actions # 12  历史动作 (t-2)
         ), dim=-1) # 59
-        
+
         self.privileged_obs_buf = torch.cat((
             self.base_lin_vel *self.obs_scales.lin_vel, # 3
             self.base_ang_vel * self.obs_scales.ang_vel, # 3
@@ -179,9 +228,9 @@ class Go2TrotRobot( LeggedRobot ):
             contact_mask # 2
         ), dim=-1) # 77
 
-        if self.add_noise:  
+        if self.add_noise:
             self.obs_buf += (2 * torch.rand_like(self.obs_buf) - 1) * self.noise_scale_vec
-    
+
     def create_sim(self):
         self.up_axis_idx = 2
         self.sim = self.gym.create_sim(self.sim_device_id, self.graphics_device_id, self.physics_engine, self.sim_params)
@@ -198,7 +247,7 @@ class Go2TrotRobot( LeggedRobot ):
             raise ValueError(
                 "Terrain mesh type not recognised. Allowed types are [None, plane, heightfield, trimesh]")
         self._create_envs()
-    
+
     def set_camera(self, position, lookat):
         cam_pos = gymapi.Vec3(position[0], position[1], position[2])
         cam_target = gymapi.Vec3(lookat[0], lookat[1], lookat[2])
@@ -209,7 +258,7 @@ class Go2TrotRobot( LeggedRobot ):
         phase = (self.episode_length_buf * self.dt) % cycle_time / cycle_time
 
         return phase
-    
+
     def _get_gait_phase(self):
         phase = self._get_phase()
         stance_mask = torch.zeros((self.num_envs, 2), device=self.device)
@@ -217,7 +266,7 @@ class Go2TrotRobot( LeggedRobot ):
         stance_mask[:, 1] = phase > 0.5
 
         return stance_mask
-    
+
     #------------- Callbacks --------------
     def _process_rigid_body_props(self, props, env_id):
         if self.cfg.domain_rand.randomize_friction:
@@ -227,21 +276,21 @@ class Go2TrotRobot( LeggedRobot ):
                 bucket_ids = torch.randint(0, num_buckets, (self.num_envs, 1))
                 friction_buckets = torch_rand_float(friction_range[0], friction_range[1], (num_buckets, 1), device='cpu')
                 self.friction_coeffs = friction_buckets[bucket_ids]
-            
+
             for s in range(len(props)):
                 props[s].friction = self.friction_coeffs[env_id]
-            
+
             return props
-    
+
     def _process_dof_props(self, props, env_id):
         if env_id == 0:
             self.dof_pos_limits = torch.zeros(self.num_dof, 2, dtype=torch.float, device=self.device, requires_grad=False)
             self.dof_vel_limits = torch.zeros(self.num_dof, dtype=torch.float, device=self.device, requires_grad=False)
             self.torque_limits = torch.zeros(self.num_dof, dtype=torch.float, device=self.device, requires_grad=False)
             for i in range(len(props)):
-                self.dof_pos_limits[i, 0] = props["lower"][i].item() 
-                self.dof_pos_limits[i, 1] = props["upper"][i].item() 
-                self.dof_vel_limits[i] = props["velocity"][i].item() 
+                self.dof_pos_limits[i, 0] = props["lower"][i].item()
+                self.dof_pos_limits[i, 1] = props["upper"][i].item()
+                self.dof_vel_limits[i] = props["velocity"][i].item()
                 self.torque_limits[i] = props["effort"][i].item()
                 # soft limits
                 m = (self.dof_pos_limits[i, 0] + self.dof_pos_limits[i, 1]) / 2
@@ -261,7 +310,7 @@ class Go2TrotRobot( LeggedRobot ):
         # randomize link masses
         if self.cfg.domain_rand.randomize_link_mass:
             self.multiplied_link_masses_ratio = torch_rand_float(self.cfg.domain_rand.multiplied_link_mass_range[0], self.cfg.domain_rand.multiplied_link_mass_range[1], (1, self.num_bodies - 1), device=self.device)
-    
+
             for i in range(1, len(props)):
                 props[i].mass *= self.multiplied_link_masses_ratio[0, i - 1]
 
@@ -273,16 +322,21 @@ class Go2TrotRobot( LeggedRobot ):
         return props
 
     def _post_physics_step_callback(self):
+        # 找出需要“重新采样指令”的环境 ID
         env_ids = (self.episode_length_buf % int(self.cfg.commands.resampling_time / self.dt)==0).nonzero(as_tuple=False).flatten()
+        # 找出需要“重新采样指令”的环境 ID
         self._resample_commands(env_ids)
+
+        # 如果启用了 heading command（朝向控制）
         if self.cfg.commands.heading_command:
             forward = quat_apply(self.base_quat, self.forward_vec)
             heading = torch.atan2(forward[:, 1], forward[:, 0])
             self.commands[:, 2] = torch.clip(0.5*wrap_to_pi(self.commands[:, 3] - heading), -1., 1.)
 
+        # 域随机化：周期性“推一下”机器人
         if self.cfg.domain_rand.push_robots and  (self.common_step_counter % self.cfg.domain_rand.push_interval == 0):
             self._push_robots()
-    
+
     def _resample_commands(self, env_ids):
         self.commands[env_ids, 0] = torch_rand_float(self.command_ranges["lin_vel_x"][0], self.command_ranges["lin_vel_x"][1], (len(env_ids), 1), device=self.device).squeeze(1)
         self.commands[env_ids, 1] = torch_rand_float(self.command_ranges["lin_vel_y"][0], self.command_ranges["lin_vel_y"][1], (len(env_ids), 1), device=self.device).squeeze(1)
@@ -292,7 +346,7 @@ class Go2TrotRobot( LeggedRobot ):
             self.commands[env_ids, 2] = torch_rand_float(self.command_ranges["ang_vel_yaw"][0], self.command_ranges["ang_vel_yaw"][1], (len(env_ids), 1), device=self.device).squeeze(1)
 
         self.commands[env_ids, :2] *= (torch.norm(self.commands[env_ids, :2], dim=1) > 0.2).unsqueeze(1)
-    
+
     def _compute_torques(self, actions):
         #TODO Add randomization of the motor zero calibration for real machine and randomization of the motor pd gains
         actions_scaled = actions * self.cfg.control.action_scale
@@ -305,9 +359,9 @@ class Go2TrotRobot( LeggedRobot ):
             torques = actions_scaled
         else:
             raise NameError(f"Unknown controller type: {control_type}")
-        
+
         return torch.clip(torques, -self.torque_limits, self.torque_limits)
-    
+
     def _reset_dofs(self, env_ids):
         self.dof_pos[env_ids] = self.default_dof_pos + torch_rand_float(-0.1, 0.1, (len(env_ids), self.num_dof), device=self.device)
         self.dof_vel[env_ids] = 0.
@@ -316,7 +370,7 @@ class Go2TrotRobot( LeggedRobot ):
         self.gym.set_dof_state_tensor_indexed(self.sim,
                                               gymtorch.unwrap_tensor(self.dof_state),
                                               gymtorch.unwrap_tensor(env_ids_int32), len(env_ids_int32))
-    
+
     def _reset_root_states(self, env_ids):
         # base position
         if self.custom_origins:
@@ -332,14 +386,14 @@ class Go2TrotRobot( LeggedRobot ):
         self.gym.set_actor_root_state_tensor_indexed(self.sim,
                                                      gymtorch.unwrap_tensor(self.root_states),
                                                      gymtorch.unwrap_tensor(env_ids_int32), len(env_ids_int32))
-    
+
     def _push_robots(self):
         max_vel = self.cfg.domain_rand.max_push_vel_xy
         max_push_angular = self.cfg.domain_rand.max_push_ang_vel
         self.root_states[:, 7:9] = torch_rand_float(-max_vel, max_vel, (self.num_envs, 2), device=self.device) # lin vel x/y
         self.root_states[:, 10:13] = torch_rand_float(-max_push_angular, max_push_angular, (self.num_envs, 3), device=self.device) # ang vel
         self.gym.set_actor_root_state_tensor(self.sim, gymtorch.unwrap_tensor(self.root_states))
-    
+
     def _update_terrain_curriculum(self, env_ids):
         """ Implements the game-inspired curriculum.
 
@@ -372,7 +426,7 @@ class Go2TrotRobot( LeggedRobot ):
         if torch.mean(self.episode_sums["tracking_lin_vel"][env_ids]) / self.max_episode_length > 0.8 * self.reward_scales["tracking_lin_vel"]:
             self.command_ranges["lin_vel_x"][0] = np.clip(self.command_ranges["lin_vel_x"][0] - 0.5, -self.cfg.commands.max_curriculum, 0.)
             self.command_ranges["lin_vel_x"][1] = np.clip(self.command_ranges["lin_vel_x"][1] + 0.5, 0., self.cfg.commands.max_curriculum)
-    
+
     def _get_noise_scale_vec(self, cfg):
         noise_vec = torch.zeros_like(self.obs_buf[0])
         self.add_noise = self.cfg.noise.add_noise
@@ -387,7 +441,7 @@ class Go2TrotRobot( LeggedRobot ):
         noise_vec[47:59] = 0.  # last_actions
 
         return noise_vec
-    
+
     #----------------------------------------
     def _init_buffers(self):
         # get gym GPU state tensors
@@ -460,7 +514,7 @@ class Go2TrotRobot( LeggedRobot ):
         for key in list(self.reward_scales.keys()):
             scale = self.reward_scales[key]
             if scale==0:
-                self.reward_scales.pop(key) 
+                self.reward_scales.pop(key)
             else:
                 self.reward_scales[key] *= self.dt
         # prepare list of functions
@@ -476,7 +530,7 @@ class Go2TrotRobot( LeggedRobot ):
         # reward episode sums
         self.episode_sums = {name: torch.zeros(self.num_envs, dtype=torch.float, device=self.device, requires_grad=False)
                              for name in self.reward_scales.keys()}
-    
+
     def _create_ground_plane(self):
         """ Adds a ground plane to the simulation, sets friction and restitution based on the cfg.
         """
@@ -486,7 +540,7 @@ class Go2TrotRobot( LeggedRobot ):
         plane_params.dynamic_friction = self.cfg.terrain.dynamic_friction
         plane_params.restitution = self.cfg.terrain.restitution
         self.gym.add_ground(self.sim, plane_params)
-    
+
     def _create_heightfield(self):
         """ Adds a heightfield terrain to the simulation, sets parameters based on the cfg.
         """
@@ -495,8 +549,8 @@ class Go2TrotRobot( LeggedRobot ):
         hf_params.row_scale = self.terrain.cfg.horizontal_scale
         hf_params.vertical_scale = self.terrain.cfg.vertical_scale
         hf_params.nbRows = self.terrain.tot_cols
-        hf_params.nbColumns = self.terrain.tot_rows 
-        hf_params.transform.p.x = -self.terrain.cfg.border_size 
+        hf_params.nbColumns = self.terrain.tot_rows
+        hf_params.transform.p.x = -self.terrain.cfg.border_size
         hf_params.transform.p.y = -self.terrain.cfg.border_size
         hf_params.transform.p.z = 0.0
         hf_params.static_friction = self.cfg.terrain.static_friction
@@ -513,20 +567,20 @@ class Go2TrotRobot( LeggedRobot ):
         tm_params.nb_vertices = self.terrain.vertices.shape[0]
         tm_params.nb_triangles = self.terrain.triangles.shape[0]
 
-        tm_params.transform.p.x = -self.terrain.cfg.border_size 
+        tm_params.transform.p.x = -self.terrain.cfg.border_size
         tm_params.transform.p.y = -self.terrain.cfg.border_size
         tm_params.transform.p.z = 0.0
         tm_params.static_friction = self.cfg.terrain.static_friction
         tm_params.dynamic_friction = self.cfg.terrain.dynamic_friction
         tm_params.restitution = self.cfg.terrain.restitution
-        self.gym.add_triangle_mesh(self.sim, self.terrain.vertices.flatten(order='C'), self.terrain.triangles.flatten(order='C'), tm_params)   
+        self.gym.add_triangle_mesh(self.sim, self.terrain.vertices.flatten(order='C'), self.terrain.triangles.flatten(order='C'), tm_params)
         self.height_samples = torch.tensor(self.terrain.heightsamples).view(self.terrain.tot_rows, self.terrain.tot_cols).to(self.device)
 
     def _create_envs(self):
         """ Creates environments:
              1. loads the robot URDF/MJCF asset,
              2. For each environment
-                2.1 creates the environment, 
+                2.1 creates the environment,
                 2.2 calls DOF and Rigid shape properties callbacks,
                 2.3 create actor with these properties and add them to the env
              3. Store indices of different bodies of the robot
@@ -569,7 +623,7 @@ class Go2TrotRobot( LeggedRobot ):
         termination_contact_names = []
         for name in self.cfg.asset.terminate_after_contacts_on:
             termination_contact_names.extend([s for s in body_names if name in s])
-        
+
         base_init_state_list = self.cfg.init_state.pos + self.cfg.init_state.rot + self.cfg.init_state.lin_vel + self.cfg.init_state.ang_vel
         self.base_init_state = to_torch(base_init_state_list, device=self.device, requires_grad=False)
         start_pose = gymapi.Transform()
@@ -598,7 +652,7 @@ class Go2TrotRobot( LeggedRobot ):
             self.gym.set_actor_rigid_body_properties(env_handle, actor_handle, body_props, recomputeInertia=True)
             self.envs.append(env_handle)
             self.actor_handles.append(actor_handle)
-        
+
         self.feet_indices = torch.zeros(len(feet_names), dtype=torch.long, device=self.device, requires_grad=False)
         for i in range(len(feet_names)):
             self.feet_indices[i] = self.gym.find_actor_rigid_body_handle(self.envs[0], self.actor_handles[0], feet_names[i])
@@ -663,7 +717,32 @@ class Go2TrotRobot( LeggedRobot ):
         self.trot=TROT.to(torch.float32).mean()
 
         return TROT*(torch.norm(self.commands[:, :2], dim=1) > 0.1)
-    
+
+    # def _reward_trot(self):
+    #     # 获取接触状态（脚是否踩地）
+    #     contact = self.contact_forces[:, self.feet_indices, 2] > 5
+    #     # 获取期望的步态相位（时钟信号告诉现在该谁踩地）
+    #     stance_mask = self._get_gait_phase()
+
+    #     # 定义 PACE 顺拐逻辑
+    #     # 顺拐要求：同侧腿状态一致
+    #     # contact[:, 0] 是左前 (FL), contact[:, 2] 是左后 (RL) -> 左侧同相
+    #     # contact[:, 1] 是右前 (FR), contact[:, 3] 是右后 (RR) -> 右侧同相
+    #     # PACE = (contact[:, 0] == contact[:, 2]) & \
+    #     #        (contact[:, 1] == contact[:, 3]) & \
+    #     #        (contact[:, 0] == stance_mask[:, 0]) & \
+    #     #        (contact[:, 1] == stance_mask[:, 1])
+    #     # self.trot = PACE.to(torch.float32).mean()
+
+    #     # 定义 BOUND (奔跑) 逻辑
+    #     BOUND = (contact[:, 0] == contact[:, 1]) & \
+    #            (contact[:, 2] == contact[:, 3]) & \
+    #            (contact[:, 0] == stance_mask[:, 0]) & \
+    #            (contact[:, 2] == stance_mask[:, 1])
+    #     self.trot = BOUND.to(torch.float32).mean()
+    #     # 只有在有速度指令时才给予奖励
+    #     return BOUND * (torch.norm(self.commands[:, :2], dim=1) > 0.1)
+
     def _reward_feet_clearance(self):
         # Compute feet contact mask
         self.feet_height = self.rigid_state[:, self.feet_indices, 2] - 0.02
@@ -678,22 +757,22 @@ class Go2TrotRobot( LeggedRobot ):
         rew = torch.exp(-torch.sum(torch.abs(left_feet_height - target_height) * swing_mask[:, 0].unsqueeze(1).repeat(1, 2),dim=1) * 10)
         # print(rew[0],torch.sum(torch.abs(left_feet_height-target_height),dim=1)[0])
         rew += torch.exp(-torch.sum(torch.abs(right_feet_height - target_height) * swing_mask[:, 1].unsqueeze(1).repeat(1, 2),dim=1) * 10)
-        
+
         return rew*(torch.norm(self.commands[:, :2], dim=1) > 0.1)
 
     def _reward_default_hip_pos(self):
         joint_diff = torch.abs(self.dof_pos[:, 0]) + torch.abs(self.dof_pos[:, 3])+torch.abs(self.dof_pos[:,6])+torch.abs(self.dof_pos[:,9])
 
-        return joint_diff  
+        return joint_diff
 
     def _reward_lin_vel_z(self):
         # Penalize z axis base linear velocity
         return torch.square(self.base_lin_vel[:, 2])
-    
+
     def _reward_ang_vel_xy(self):
         # Penalize xy axes base angular velocity
         return torch.sum(torch.square(self.base_ang_vel[:, :2]), dim=1)
-    
+
     def _reward_orientation(self):
         # Penalize non flat base orientation
         return torch.sum(torch.square(self.projected_gravity[:, :2]), dim=1)
@@ -702,7 +781,7 @@ class Go2TrotRobot( LeggedRobot ):
         # Penalize base height away from target
         base_height = self.root_states[:, 2]
         return torch.square(base_height - self.cfg.rewards.base_height_target)
-    
+
     def _reward_torques(self):
         # Penalize torques
         return torch.sum(torch.square(self.torques), dim=1)
@@ -710,22 +789,22 @@ class Go2TrotRobot( LeggedRobot ):
     def _reward_dof_vel(self):
         # Penalize dof velocities
         return torch.sum(torch.square(self.dof_vel), dim=1)
-    
+
     def _reward_dof_acc(self):
         # Penalize dof accelerations
         return torch.sum(torch.square((self.last_dof_vel - self.dof_vel) / self.dt), dim=1)
-    
+
     def _reward_action_rate(self):
         # Penalize changes in actions
         return torch.sum(torch.square(self.last_actions - self.actions), dim=1)
     def _reward_collision(self):
         # Penalize collisions on selected bodies
         return torch.sum(1.*(torch.norm(self.contact_forces[:, self.penalised_contact_indices, :], dim=-1) > 0.1), dim=1)
-    
+
     def _reward_termination(self):
         # Terminal reward / penalty
         return self.reset_buf * ~self.time_out_buf
-    
+
     def _reward_dof_vel_limits(self):
         # Penalize dof velocities too close to the limit
         # clip to max error = 1 rad/s per joint to avoid huge penalties
@@ -735,9 +814,9 @@ class Go2TrotRobot( LeggedRobot ):
         # Tracking of linear velocity commands (xy axes)
         lin_vel_error = torch.sum(torch.square(self.commands[:, :2] - self.base_lin_vel[:, :2]), dim=1)
         return torch.exp(-lin_vel_error/self.cfg.rewards.tracking_sigma)*(self.trot>0.78)
-    
+
     def _reward_tracking_ang_vel(self):
-        # Tracking of angular velocity commands (yaw) 
+        # Tracking of angular velocity commands (yaw)
         ang_vel_error = torch.square(self.commands[:, 2] - self.base_ang_vel[:, 2])
         return torch.exp(-ang_vel_error/self.cfg.rewards.tracking_sigma)*(self.trot>0.78)
 
@@ -752,13 +831,3 @@ class Go2TrotRobot( LeggedRobot ):
     def _reward_default_pos(self):
         # Penalize motion at zero commands
         return torch.sum(torch.abs(self.dof_pos - self.default_dof_pos), dim=1) #* (torch.norm(self.commands[:, :2], dim=1) < 0.1)
-        
-        
-
-        
-
-
-
-
-
-
